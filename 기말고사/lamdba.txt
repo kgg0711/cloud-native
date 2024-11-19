@@ -1,0 +1,120 @@
+import { TranslateClient, TranslateTextCommand } from "@aws-sdk/client-translate";
+import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
+import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
+
+//  Translate 클라이언트를 생성
+const translate = new TranslateClient({ region: 'ap-northeast-2' });
+
+// SES 클라이언트 생성
+const SES = new SESClient({ region: 'ap-northeast-2' });
+
+// DynamoDB 클라이언트 생성 
+const dynamoDB = new DynamoDBClient({ region: 'ap-northeast-2' });
+
+export const handler = async (event) => {
+    console.log("Request body:", JSON.stringify(event.body));
+
+    let response;
+    try {
+        // 클라이언트에서 전달된 텍스트 데이터를 파싱
+        response = JSON.parse(event.body);
+
+        // 번역 파라미터 설정
+        const translateParams = {
+            SourceLanguageCode: 'auto', // 자동 언어 감지
+            TargetLanguageCode: 'en',   // 텍스트를 영어로 번역 
+            Text: response.text
+        };
+
+        // AWS Translate 텍스트 번역 실행
+        const command = new TranslateTextCommand(translateParams);
+        const data = await translate.send(command);
+
+        const translatedText = data.TranslatedText;
+        const detectedLanguage = data.SourceLanguageCode; 
+
+        // 번역 결과 이메일 발송
+        const emailResponse = await sendEmail(response.text, translatedText);
+
+        // 번역된 텍스트와 감지된 언어를 DynamoDB에 삽입
+        await saveToDynamoDB(response.text, translatedText, detectedLanguage);
+
+        // 성공적으로 번역된 텍스트와 감지된 언어 반환
+        return {
+            statusCode: 200,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Credentials": true
+            },
+            body: JSON.stringify({
+                translatedText: translatedText,
+                detectedLanguage: detectedLanguage 
+            })
+        };
+
+    } catch (e) {
+        console.log('Error occurred:', e);
+        return {
+            statusCode: 500,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Credentials": true
+            },
+            body: JSON.stringify(e)
+        };
+    }
+};
+
+// 이메일 발송을 위한 함수
+async function sendEmail(originalText, translatedText) {
+    const params = {
+        Source: 'kgg0711@naver.com', // 발신자 이메일 
+        Destination: {
+            ToAddresses: ['kgg0711@daum.net'] // 수신자 이메일 
+        },
+        Message: {
+            Subject: { Data: '번역 결과' },
+            Body: {
+                Text: {
+                    Data: `Original Text: ${originalText}\n\nTranslated Text: ${translatedText}`
+                }
+            }
+        }
+    };
+
+    try {
+        // 이메일 전송 명령
+        const command = new SendEmailCommand(params);
+        await SES.send(command); // SES 이메일 전송
+        console.log("Email sent successfully!");
+    } catch (error) {
+        console.log('Error sending email:', error);  
+    }
+}
+
+// DynamoDB에 데이터를 삽입하는 함수
+async function saveToDynamoDB(originalText, translatedText, detectedLanguage) {
+    const params = {
+        TableName: 'dynamo_apigateway_query_3', 
+        Item: {
+            id: { S: generateUniqueId() }, 
+            originalText: { S: originalText },
+            translatedText: { S: translatedText },
+            detectedLanguage: { S: detectedLanguage },
+            timestamp: { S: new Date().toISOString() }
+        }
+    };
+
+    try {
+        const command = new PutItemCommand(params);
+        await dynamoDB.send(command); 
+        console.log("Data saved to DynamoDB successfully!");
+    } catch (error) {
+        console.log('Error saving data to DynamoDB:', error);  
+    }
+}
+
+
+function generateUniqueId() {
+    return `id-${Date.now()}`; 
+}
